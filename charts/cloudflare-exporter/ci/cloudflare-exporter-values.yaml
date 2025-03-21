@@ -1,3 +1,0 @@
-env:
-  - name: CF_API_TOKEN
-    value: XYZ
