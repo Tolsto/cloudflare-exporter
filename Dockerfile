@@ -1,4 +1,4 @@
-FROM golang:alpine as builder
+FROM golang:1.24-alpine AS builder
 
 WORKDIR /app
 
@@ -11,13 +11,10 @@ COPY go.sum go.sum
 RUN go get -d -v
 RUN CGO_ENABLED=0 GOOS=linux go build --ldflags '-w -s -extldflags "-static"' -o cloudflare_exporter .
 
-FROM alpine:3.19
+FROM scratch
 
-RUN apk update && apk add ca-certificates
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 
 COPY --from=builder /app/cloudflare_exporter cloudflare_exporter
-
-ENV CF_API_KEY ""
-ENV CF_API_EMAIL ""
 
 ENTRYPOINT [ "./cloudflare_exporter" ]
