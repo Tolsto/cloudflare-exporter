@@ -21,7 +21,6 @@
 package main
 
 import (
-	"github.com/spf13/viper"
 	"strconv"
 	"sync"
 	"time"
@@ -52,15 +51,12 @@ func (ms MetricsSet) Add(mn MetricName) {
 	ms[mn] = struct{}{}
 }
 
-// TimestampedMetric holds a prometheus metric together with its timestamp
-type TimestampedMetric struct {
-	Timestamp time.Time
-	Metric    prometheus.Metric
-}
+// MetricID uniquely identifies a metric by name and label values
+type MetricID string
 
 // CloudflareCollector implements the prometheus.Collector interface
 type CloudflareCollector struct {
-	metrics         []TimestampedMetric
+	metrics         map[MetricID]prometheus.Metric
 	metricFamilies  map[string]*prometheus.Desc
 	metricsMutex    sync.Mutex
 	lastCollectTime time.Time
@@ -69,7 +65,7 @@ type CloudflareCollector struct {
 // Create a new CloudflareCollector
 func NewCloudflareCollector() *CloudflareCollector {
 	c := &CloudflareCollector{
-		metrics:         []TimestampedMetric{},
+		metrics:         make(map[MetricID]prometheus.Metric),
 		metricFamilies:  make(map[string]*prometheus.Desc),
 		lastCollectTime: time.Now(),
 	}
@@ -82,6 +78,15 @@ func NewCloudflareCollector() *CloudflareCollector {
 	)
 
 	return c
+}
+
+// generateMetricID creates a unique identifier for a metric
+func generateMetricID(metricName MetricName, labelValues ...string) MetricID {
+	id := metricName.String()
+	for _, label := range labelValues {
+		id += ":" + label
+	}
+	return MetricID(id)
 }
 
 // Describe implements prometheus.Collector
@@ -97,22 +102,23 @@ func (c *CloudflareCollector) Collect(ch chan<- prometheus.Metric) {
 	defer c.metricsMutex.Unlock()
 
 	// Send all metrics to the channel
-	for _, tm := range c.metrics {
-		ch <- tm.Metric
+	for _, metric := range c.metrics {
+		ch <- metric
 	}
 }
 
 // AddMetricWithTimestamp adds a new metric with timestamp to the collector
 func (c *CloudflareCollector) AddMetricWithTimestamp(
-	metricFamily string,
+	metricName MetricName,
 	valueType prometheus.ValueType,
 	value float64,
 	timestamp time.Time,
 	labelValues ...string) {
 
-	desc, ok := c.metricFamilies[metricFamily]
+	metricNameStr := metricName.String()
+	desc, ok := c.metricFamilies[metricNameStr]
 	if !ok {
-		log.Warnf("Unknown metric family: %s", metricFamily)
+		log.Warnf("Unknown metric family: %s", metricNameStr)
 		return
 	}
 
@@ -128,32 +134,12 @@ func (c *CloudflareCollector) AddMetricWithTimestamp(
 			value,
 			labelValues...))
 
-	// Store in our timestamped structure
-	c.metrics = append(c.metrics, TimestampedMetric{
-		Timestamp: timestamp,
-		Metric:    metric,
-	})
+	// Generate a unique ID for this metric
+	metricID := generateMetricID(metricName, labelValues...)
+
+	// Store the metric, replacing any existing metric with same ID
+	c.metrics[metricID] = metric
 	c.lastCollectTime = time.Now()
-}
-
-// ClearOldMetrics removes metrics older than the specified duration
-func (c *CloudflareCollector) ClearOldMetrics(age time.Duration) {
-	c.metricsMutex.Lock()
-	defer c.metricsMutex.Unlock()
-
-	cutoff := time.Now().Add(-age)
-	filteredMetrics := []TimestampedMetric{}
-
-	// Keep only metrics newer than the cutoff
-	for _, tm := range c.metrics {
-		if tm.Timestamp.After(cutoff) {
-			filteredMetrics = append(filteredMetrics, tm)
-		}
-	}
-
-	// Replace with filtered metrics
-	log.Infof("Cleared %d old metrics (keeping %d)", len(c.metrics)-len(filteredMetrics), len(filteredMetrics))
-	c.metrics = filteredMetrics
 }
 
 // The global collector
@@ -181,7 +167,7 @@ func collectHttpAdaptiveMetrics(zones []cloudflare.Zone, timestampForFetchCycle 
 		zoneName, _ := findZoneAccountName(zones, z.ZoneTag)
 		for _, c := range z.Groups {
 			cfCollector.AddMetricWithTimestamp(
-				httpRequestsAdaptiveMetricName.String(),
+				httpRequestsAdaptiveMetricName,
 				prometheus.GaugeValue,
 				float64(c.Count),
 				timestamp,
@@ -192,8 +178,4 @@ func collectHttpAdaptiveMetrics(zones []cloudflare.Zone, timestampForFetchCycle 
 			)
 		}
 	}
-
-	scrapeDelay := time.Duration(viper.GetInt("scrape_delay")) * time.Second
-	// Clean up metrics older than 5 minutes after adding the new ones
-	cfCollector.ClearOldMetrics(5*time.Minute + scrapeDelay)
 }
